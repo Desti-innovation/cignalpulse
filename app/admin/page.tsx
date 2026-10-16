@@ -20,6 +20,7 @@ export default async function AdminPage() {
   const session = await getAdminSession()
   if (!session) redirect("/admin/login")
 
+  // Keep this — the body below uses admin.full_name
   const [admin] = await sql`
     SELECT id, username, email, full_name
     FROM admins
@@ -64,11 +65,6 @@ export default async function AdminPage() {
 
   return (
     <AdminContent
-      admin={{
-        fullName: admin.full_name,
-        email: admin.email,
-        username: admin.username,
-      }}
       breadcrumbs={[{ label: "Admin", href: "/admin" }, { label: "Overview" }]}
     >
       <div className="flex flex-1 flex-col gap-6 p-6">
@@ -83,7 +79,7 @@ export default async function AdminPage() {
                 Welcome back, {admin.full_name}
               </h1>
               <p className="text-sm text-muted-foreground">
-                You're signed in to the SignalPulse Admin Portal.
+                You&apos;re signed in to the CignalPulse Admin Portal.
               </p>
             </div>
           </div>
@@ -104,7 +100,7 @@ export default async function AdminPage() {
           ))}
         </div>
 
-        {/* Widgets: Needs Attention + Recent Activity */}
+        {/* Widgets */}
         <div className="grid gap-6 lg:grid-cols-2">
           <AttentionWidget data={attention} />
           <RecentActivityWidget data={activity} />

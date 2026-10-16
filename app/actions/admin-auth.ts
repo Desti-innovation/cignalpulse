@@ -31,7 +31,9 @@ export async function adminLoginAction(
     if (!rateCheck.allowed) {
       return {
         success: false,
-        error: `Too many admin login attempts. Try again in ${rateCheck.retryAfterSeconds} seconds.`,
+        error: `Too many admin login attempts. Try again in ${
+          rateCheck.retryAfterSeconds ?? 900
+        } seconds.`,
       }
     }
   } catch {
@@ -70,12 +72,7 @@ export async function adminLoginAction(
       return { success: false, error: "Invalid admin credentials." }
     }
 
-    await sql`
-      UPDATE admins
-      SET last_login_at = NOW()
-      WHERE id = ${admin.id}
-    `
-
+    // ---- Create the admin session cookie ----
     await createAdminSession({
       adminId: admin.id,
       username: admin.username,
@@ -83,6 +80,19 @@ export async function adminLoginAction(
       fullName: admin.full_name,
       role: "admin",
     })
+
+    // ---- 🔑 THE FIX: stamp last_activity_at so the idle tracker doesn't
+    //      see a stale timestamp from a previous session and immediately
+    //      log the admin back out.
+    //
+    //      Also update last_login_at for audit purposes. ----
+    await sql`
+      UPDATE admins
+      SET 
+        last_login_at = NOW(),
+        last_activity_at = NOW()
+      WHERE id = ${admin.id}
+    `
 
     return { success: true, redirectTo: "/admin" }
   } catch (error) {

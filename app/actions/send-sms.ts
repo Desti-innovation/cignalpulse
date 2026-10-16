@@ -137,6 +137,19 @@ export async function getUserSendContext(): Promise<UserSendContext | null> {
 // ============================================================
 // Main action — send SMS
 // ============================================================
+//
+// Credit handling model:
+//   1. Validate everything (inputs, gate, wallet balance)
+//   2. Verify sender ID is one of the user's approved IDs
+//   3. DEDUCT credits from the user's wallet FIRST
+//   4. If scheduled → insert row with status='scheduled' and return
+//   5. If immediate → call the SMS gateway
+//      - On failure → REFUND credits, return error
+//      - On success → insert campaign row with status='sent'
+//   6. If anything else throws after deduction → REFUND credits
+//
+// This guarantees: a user is only charged for a campaign that was
+// actually accepted by the gateway (or scheduled for later).
 
 export async function sendSmsAction(
   input: SendSmsInput
@@ -151,7 +164,9 @@ export async function sendSmsAction(
   if (!rateCheck.allowed) {
     return {
       success: false,
-      error: `You're sending too many campaigns. Please try again in ${rateCheck.retryAfterSeconds} seconds.`,
+      error: `You're sending too many campaigns. Please try again in ${
+        rateCheck.retryAfterSeconds ?? 60
+      } seconds.`,
     }
   }
 
@@ -176,9 +191,37 @@ export async function sendSmsAction(
 
   const recipients = recipientsCheck.value
   const message = input.message.trim()
-  const senderId = input.senderId.trim().toUpperCase()
+  // Preserve the EXACT case of the sender ID — mNotify's approval is
+  // case-sensitive. We store what the user submitted in
+  // sender_id_requests.sender_id, and must send the same string.
+  const senderId = input.senderId.trim()
 
-  // ---- Sync gate — check if user can send ----
+  // ---- Verify sender ID is one of the user's approved IDs ----
+  const [userRow] = await sql`
+    SELECT email FROM users WHERE id = ${session.userId} LIMIT 1
+  `
+  if (!userRow) {
+    return { success: false, error: "User not found." }
+  }
+
+  const approvedRows = await sql`
+    SELECT sender_id
+    FROM sender_id_requests
+    WHERE email = ${userRow.email}
+      AND status = 'approved'
+  `
+  const approvedIds = approvedRows.map((r) => r.sender_id)
+
+  if (!approvedIds.includes(senderId)) {
+    return {
+      success: false,
+      error: `"${senderId}" is not an approved sender ID for this account. Approved: ${
+        approvedIds.length > 0 ? approvedIds.join(", ") : "none"
+      }`,
+    }
+  }
+
+  // ---- Sync gate ----
   const gate = await canUserSend(session.userId, message)
   if (!gate.allowed) {
     return { success: false, error: gate.reason || "Sending blocked." }
@@ -196,7 +239,9 @@ export async function sendSmsAction(
   if (!wallet || wallet.sms_credits < totalCreditsNeeded) {
     return {
       success: false,
-      error: `Insufficient credits. Need ${totalCreditsNeeded.toLocaleString()}, have ${(wallet?.sms_credits ?? 0).toLocaleString()}.`,
+      error: `Insufficient credits. Need ${totalCreditsNeeded.toLocaleString()}, have ${(
+        wallet?.sms_credits ?? 0
+      ).toLocaleString()}.`,
     }
   }
 
@@ -204,7 +249,6 @@ export async function sendSmsAction(
   const isScheduled =
     !!input.scheduledAt && new Date(input.scheduledAt) > new Date()
 
-  // Validate schedule date isn't absurdly far in the future (max 1 year)
   if (isScheduled && input.scheduledAt) {
     const scheduledDate = new Date(input.scheduledAt)
     const oneYearFromNow = new Date()
@@ -217,15 +261,48 @@ export async function sendSmsAction(
     }
   }
 
+  // ============================================================
+  // STEP 1 — Deduct credits FIRST (both scheduled and immediate)
+  // ============================================================
   try {
-    // ---- Send via gateway (skip if scheduled) ----
+    await deductCreditsFromBatches(session.userId, totalCreditsNeeded)
+  } catch (err) {
+    console.error("[send-sms] credit deduction failed:", err)
+    return {
+      success: false,
+      error: "Failed to reserve credits. Please try again.",
+    }
+  }
+
+  let creditsReserved = true
+
+  const refund = async (reason: string) => {
+    if (!creditsReserved) return
+    try {
+      await refundCreditsToWallet(session.userId, totalCreditsNeeded)
+      creditsReserved = false
+      console.log(
+        `[send-sms] refunded ${totalCreditsNeeded} credits to user ${session.userId} — reason: ${reason}`
+      )
+    } catch (err) {
+      console.error(
+        `[send-sms] CRITICAL: refund failed for user ${session.userId} — ${totalCreditsNeeded} credits lost. Reason: ${reason}`,
+        err
+      )
+    }
+  }
+
+  // ============================================================
+  // STEP 2 — Send (or schedule) and record the campaign
+  // ============================================================
+  try {
     let gatewayResult: {
       success: boolean
       campaignId?: string
       totalSent?: number
       totalRejected?: number
       creditsUsed?: number
-    } = { success: true, campaignId: `SCHED-${Date.now()}`, totalSent: 0 }
+    } = { success: true, campaignId: `PENDING-${Date.now()}`, totalSent: 0 }
 
     if (!isScheduled) {
       const result = await sms.send({
@@ -233,9 +310,15 @@ export async function sendSmsAction(
         senderId,
         message,
       })
+
       if (!result.success) {
-        return { success: false, error: result.error || "Send failed." }
+        await refund(`gateway error: ${result.error || "unknown"}`)
+        return {
+          success: false,
+          error: result.error || "Send failed.",
+        }
       }
+
       gatewayResult = {
         success: true,
         campaignId: result.campaignId,
@@ -253,7 +336,7 @@ export async function sendSmsAction(
         credits_used, status, sent_at, scheduled_at, recipients_json
       ) VALUES (
         ${session.userId},
-        ${gatewayResult.campaignId ?? `SCHED-${Date.now()}`},
+        ${gatewayResult.campaignId ?? `PENDING-${Date.now()}`},
         ${senderId},
         ${message},
         ${input.mode},
@@ -269,14 +352,15 @@ export async function sendSmsAction(
       RETURNING id
     `
 
-    // ---- Deduct credits from batches (only if not scheduled) ----
-    if (!isScheduled) {
-      await deductCreditsFromBatches(session.userId, totalCreditsNeeded)
-    }
+    // Success — credits stay deducted
+    creditsReserved = false
 
     revalidatePath("/dashboard")
     revalidatePath("/dashboard/wallet")
     revalidatePath("/dashboard/campaigns")
+    if (isScheduled) {
+      revalidatePath("/dashboard/campaigns/scheduled")
+    }
 
     return {
       success: true,
@@ -289,6 +373,8 @@ export async function sendSmsAction(
     }
   } catch (error) {
     console.error("[send-sms] Failed:", error)
+    await refund("post-deduction failure")
+
     return {
       success: false,
       error: error instanceof Error ? error.message : "Send failed.",
@@ -336,6 +422,22 @@ async function deductCreditsFromBatches(
 }
 
 // ============================================================
+// Helper — refund credits to the wallet
+// ============================================================
+
+async function refundCreditsToWallet(
+  userId: number,
+  amount: number
+): Promise<void> {
+  await sql`
+    UPDATE user_wallets
+    SET sms_credits = sms_credits + ${amount},
+        updated_at = NOW()
+    WHERE user_id = ${userId}
+  `
+}
+
+// ============================================================
 // Read — Campaign detail page
 // ============================================================
 
@@ -345,7 +447,6 @@ export async function getCampaignDetail(
   const session = await getSession()
   if (!session) return null
 
-  // Validate ID
   if (!Number.isInteger(campaignDbId) || campaignDbId <= 0) return null
 
   const [row] = await sql`
@@ -404,7 +505,6 @@ export async function getCampaignMessages(
 
   if (!Number.isInteger(campaignDbId) || campaignDbId <= 0) return []
 
-  // Clamp limit
   const safeLimit = Math.min(Math.max(limit, 1), 500)
 
   const rows = await sql`
@@ -492,7 +592,6 @@ export async function resolveGroupRecipients(
 
   if (!Array.isArray(groupIds) || groupIds.length === 0) return []
 
-  // Cap at 100 groups per request
   const safeIds = groupIds
     .filter((id) => Number.isInteger(id) && id > 0)
     .slice(0, 100)
@@ -535,18 +634,18 @@ export async function saveDraftAction(
   const session = await getSession()
   if (!session) return { success: false, error: "Not authenticated." }
 
-  // ---- Rate limit drafts (30/hour) ----
   const { limit, windowMs } = RateLimits.sendSms
   const rateCheck = rateLimit(`draft:${session.userId}`, limit, windowMs)
 
   if (!rateCheck.allowed) {
     return {
       success: false,
-      error: `Too many saves. Please try again in ${rateCheck.retryAfterSeconds} seconds.`,
+      error: `Too many saves. Please try again in ${
+        rateCheck.retryAfterSeconds ?? 60
+      } seconds.`,
     }
   }
 
-  // At least something must be filled in
   const hasContent =
     (input.senderId?.trim() ?? "").length > 0 ||
     (input.message?.trim() ?? "").length > 0 ||
@@ -559,7 +658,6 @@ export async function saveDraftAction(
     }
   }
 
-  // Truncate aggressively so nothing can blow up the DB
   const senderId = (input.senderId ?? "").trim().slice(0, 11)
   const message = (input.message ?? "").trim().slice(0, 1000)
   const recipients = Array.isArray(input.recipients)

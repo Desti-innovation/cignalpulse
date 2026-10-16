@@ -14,11 +14,10 @@ export type Notification = {
   created_at: string
 }
 
-/**
- * Insert a new notification for a user.
- * Call this from any server action where an event happens
- * that the user needs to know about.
- */
+// ============================================================
+// Create — for users
+// ============================================================
+
 export async function createNotification(params: {
   userId: number
   type: NotificationType
@@ -38,14 +37,41 @@ export async function createNotification(params: {
       )
     `
   } catch (error) {
-    // Never let a notification failure break the parent action
     console.error("[createNotification] Failed:", error)
   }
 }
 
-/**
- * Fetch the most recent notifications for the current user.
- */
+// ============================================================
+// Create — for admins
+// ============================================================
+
+export async function createAdminNotification(params: {
+  adminId: number
+  type: NotificationType
+  title: string
+  body?: string
+  link?: string
+}): Promise<void> {
+  try {
+    await sql`
+      INSERT INTO notifications (admin_id, type, title, body, link)
+      VALUES (
+        ${params.adminId},
+        ${params.type},
+        ${params.title},
+        ${params.body ?? null},
+        ${params.link ?? null}
+      )
+    `
+  } catch (error) {
+    console.error("[createAdminNotification] Failed:", error)
+  }
+}
+
+// ============================================================
+// Read — users
+// ============================================================
+
 export async function getNotifications(
   userId: number,
   limit = 20
@@ -65,9 +91,6 @@ export async function getNotifications(
   }
 }
 
-/**
- * Count unread notifications — used to drive the red dot on the bell.
- */
 export async function getUnreadCount(userId: number): Promise<number> {
   try {
     const [row] = await sql`
@@ -82,9 +105,6 @@ export async function getUnreadCount(userId: number): Promise<number> {
   }
 }
 
-/**
- * Mark a single notification as read.
- */
 export async function markAsRead(
   notificationId: number,
   userId: number
@@ -100,9 +120,6 @@ export async function markAsRead(
   }
 }
 
-/**
- * Mark every unread notification as read for the user.
- */
 export async function markAllAsRead(userId: number): Promise<void> {
   try {
     await sql`
@@ -115,9 +132,6 @@ export async function markAllAsRead(userId: number): Promise<void> {
   }
 }
 
-/**
- * Delete a single notification.
- */
 export async function deleteNotification(
   notificationId: number,
   userId: number
@@ -129,5 +143,71 @@ export async function deleteNotification(
     `
   } catch (error) {
     console.error("[deleteNotification] Failed:", error)
+  }
+}
+
+// ============================================================
+// Read — admins
+// ============================================================
+
+export async function getAdminNotifications(
+  adminId: number,
+  limit = 20
+): Promise<Notification[]> {
+  try {
+    const rows = await sql`
+      SELECT id, type, title, body, link, read_at, created_at
+      FROM notifications
+      WHERE admin_id = ${adminId}
+      ORDER BY created_at DESC
+      LIMIT ${limit}
+    `
+    return rows as Notification[]
+  } catch (error) {
+    console.error("[getAdminNotifications] Failed:", error)
+    return []
+  }
+}
+
+export async function getAdminUnreadCount(adminId: number): Promise<number> {
+  try {
+    const [row] = await sql`
+      SELECT COUNT(*)::int AS count
+      FROM notifications
+      WHERE admin_id = ${adminId} AND read_at IS NULL
+    `
+    return row?.count ?? 0
+  } catch (error) {
+    console.error("[getAdminUnreadCount] Failed:", error)
+    return 0
+  }
+}
+
+export async function markAdminNotificationAsRead(
+  notificationId: number,
+  adminId: number
+): Promise<void> {
+  try {
+    await sql`
+      UPDATE notifications
+      SET read_at = NOW()
+      WHERE id = ${notificationId} AND admin_id = ${adminId}
+    `
+  } catch (error) {
+    console.error("[markAdminNotificationAsRead] Failed:", error)
+  }
+}
+
+export async function markAllAdminNotificationsAsRead(
+  adminId: number
+): Promise<void> {
+  try {
+    await sql`
+      UPDATE notifications
+      SET read_at = NOW()
+      WHERE admin_id = ${adminId} AND read_at IS NULL
+    `
+  } catch (error) {
+    console.error("[markAllAdminNotificationsAsRead] Failed:", error)
   }
 }

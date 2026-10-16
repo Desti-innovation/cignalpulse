@@ -13,11 +13,32 @@ import "server-only"
 // Provider-agnostic base URL (kept in a private constant, not exported)
 const GATEWAY_BASE_URL = "https://api.mnotify.com/api"
 
-// Coerce to a definite string so TypeScript is happy
-const GATEWAY_KEY: string = process.env.SIGNALPULSE_SMS_KEY ?? ""
+// ---------- Key handling (defensive) ----------
+//
+// Strip surrounding quotes and whitespace so a config like:
+//   SIGNALPULSE_SMS_KEY=""
+// or
+//   SIGNALPULSE_SMS_KEY="abc123"
+// or a Windows CRLF-corrupted file
+// all behave predictably.
+
+const RAW_KEY = process.env.SIGNALPULSE_SMS_KEY ?? ""
+const GATEWAY_KEY = RAW_KEY.replace(/^["']|["']$/g, "").trim()
+
+// Debug — remove after verifying the key loads correctly
+console.log(
+  "[SMS] GATEWAY_KEY length:",
+  GATEWAY_KEY.length,
+  "preview:",
+  GATEWAY_KEY
+    ? `${GATEWAY_KEY.slice(0, 6)}...${GATEWAY_KEY.slice(-4)}`
+    : "(empty)"
+)
 
 if (!GATEWAY_KEY) {
-  throw new Error("SIGNALPULSE_SMS_KEY is not configured")
+  throw new Error(
+    "SIGNALPULSE_SMS_KEY is not configured (or is empty/quoted). Set it in .env.local without quotes."
+  )
 }
 
 // ---------- Public Types (CignalPulse-branded) ----------
@@ -73,7 +94,6 @@ async function gatewayRequest<T>(
 ): Promise<GatewayResponse<T>> {
   const params = new URLSearchParams()
 
-  // GATEWAY_KEY is typed as string, so this is safe
   params.set("key", GATEWAY_KEY)
 
   if (searchParams) {
@@ -91,11 +111,34 @@ async function gatewayRequest<T>(
     cache: "no-store",
   })
 
-  if (!res.ok) {
-    throw new Error(`SMS gateway request failed (${res.status})`)
+  // ---- Read the body FIRST so we can log it on failure ----
+  const text = await res.text()
+
+  let parsed: unknown = null
+  try {
+    parsed = text ? JSON.parse(text) : null
+  } catch {
+    // Non-JSON response — keep the raw text for diagnostics
   }
 
-  return res.json()
+  if (!res.ok) {
+    // Debug log the raw response so we can see WHY the gateway rejected us
+    console.error(
+      `[SMS gateway] ${method} ${endpoint} → HTTP ${res.status} ${res.statusText}`
+    )
+    console.error("[SMS gateway] response body:", text.slice(0, 500))
+    throw new Error(
+      `SMS gateway request failed (${res.status}): ${text.slice(0, 200) || res.statusText}`
+    )
+  }
+
+  if (!parsed || typeof parsed !== "object") {
+    throw new Error(
+      `SMS gateway returned non-JSON response: ${text.slice(0, 200)}`
+    )
+  }
+
+  return parsed as GatewayResponse<T>
 }
 
 // ---------- Public API (CignalPulse-branded) ----------
@@ -144,7 +187,10 @@ export const sms = {
       console.error("[CignalPulse SMS] Send failed:", error)
       return {
         success: false,
-        error: "Unable to send SMS. Please try again.",
+        error:
+          error instanceof Error
+            ? error.message
+            : "Unable to send SMS. Please try again.",
       }
     }
   },
@@ -185,12 +231,18 @@ export const sms = {
       })
 
       if (response.status !== "success") {
-        return { success: false, error: response.message || "Registration failed" }
+        return {
+          success: false,
+          error: response.message || "Registration failed",
+        }
       }
 
       return { success: true }
     } catch (error) {
-      console.error("[CignalPulse SMS] Sender ID registration failed:", error)
+      console.error(
+        "[CignalPulse SMS] Sender ID registration failed:",
+        error
+      )
       return { success: false, error: "Unable to register Sender ID." }
     }
   },
@@ -232,7 +284,10 @@ export const sms = {
         error: response.status !== "success" ? response.message : undefined,
       }
     } catch (error) {
-      console.error("[CignalPulse SMS] Sender ID registration failed:", error)
+      console.error(
+        "[CignalPulse SMS] Sender ID registration failed:",
+        error
+      )
       return {
         status: "error",
         gatewayStatus: "Unknown",
@@ -252,12 +307,19 @@ export const sms = {
       }>("POST", "/senderid/status", { sender_name: senderId })
 
       const status = response.summary?.status
-      if (status === "Pending" || status === "Approved" || status === "Rejected") {
+      if (
+        status === "Pending" ||
+        status === "Approved" ||
+        status === "Rejected"
+      ) {
         return status
       }
       return "Unknown"
     } catch (error) {
-      console.error("[CignalPulse SMS] Sender ID status check failed:", error)
+      console.error(
+        "[CignalPulse SMS] Sender ID status check failed:",
+        error
+      )
       return "Unknown"
     }
   },
@@ -279,7 +341,9 @@ export const sms = {
 
       const status = response.summary?.status
       const gatewayStatus: SenderIdStatus =
-        status === "Pending" || status === "Approved" || status === "Rejected"
+        status === "Pending" ||
+        status === "Approved" ||
+        status === "Rejected"
           ? status
           : "Unknown"
 
@@ -289,7 +353,10 @@ export const sms = {
         raw: response,
       }
     } catch (error) {
-      console.error("[CignalPulse SMS] Sender ID status check failed:", error)
+      console.error(
+        "[CignalPulse SMS] Sender ID status check failed:",
+        error
+      )
       return {
         status: "error",
         gatewayStatus: "Unknown",

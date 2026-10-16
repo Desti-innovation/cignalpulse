@@ -20,7 +20,7 @@ export default async function AdminTemplatesPage() {
 
   return (
     <AdminContent
-      admin={{ fullName: admin.full_name, email: admin.email, username: admin.username }}
+      
       breadcrumbs={[
         { label: "Admin", href: "/admin" },
         { label: "Templates" },

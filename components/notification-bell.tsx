@@ -2,19 +2,16 @@
 
 import * as React from "react"
 import { useRouter } from "next/navigation"
-import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuGroup,
   DropdownMenuItem,
-  DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import {
   Bell,
-  Check,
   CheckCheck,
   Info,
   AlertTriangle,
@@ -28,17 +25,23 @@ import {
   getUnreadCount,
   markAsRead,
   markAllAsRead,
+  getAdminNotifications,
+  getAdminUnreadCount,
+  markAdminNotificationAsRead,
+  markAllAdminNotificationsAsRead,
   type Notification,
   type NotificationType,
 } from "@/app/actions/notifications"
 
 interface Props {
-  userId: number
+  /** User id — for regular user dashboards */
+  userId?: number
+  /** Admin id — for admin panel */
+  adminId?: number
   /** How often to poll for new notifications (ms). Default 30s. */
   pollMs?: number
 }
 
-// ---- Visual config per notification type ----
 const TYPE_STYLES: Record<
   NotificationType,
   { icon: React.ReactNode; ring: string; bg: string }
@@ -86,7 +89,7 @@ function relativeTime(iso: string): string {
   })
 }
 
-export function NotificationBell({ userId, pollMs = 30_000 }: Props) {
+export function NotificationBell({ userId, adminId, pollMs = 30_000 }: Props) {
   const router = useRouter()
   const [open, setOpen] = React.useState(false)
   const [items, setItems] = React.useState<Notification[]>([])
@@ -94,63 +97,54 @@ export function NotificationBell({ userId, pollMs = 30_000 }: Props) {
   const [loading, setLoading] = React.useState(false)
   const [markingAll, setMarkingAll] = React.useState(false)
 
-  // 🔍 DEBUG — remove after diagnosis
-  React.useEffect(() => {
-    console.log(
-      "[NotificationBell] mounted. userId =",
-      userId,
-      "typeof =",
-      typeof userId
-    )
-  }, [userId])
+  const isAdmin = adminId !== undefined
+  const recipientId = isAdmin ? adminId : userId
 
   // ---- Fetch list ----
   const refreshList = React.useCallback(async () => {
+    if (recipientId === undefined) return
     setLoading(true)
     try {
-      const list = await getNotifications(userId, 20)
-      console.log("[NotificationBell] list loaded:", list.length, "items")
+      const list = isAdmin
+        ? await getAdminNotifications(recipientId, 20)
+        : await getNotifications(recipientId, 20)
       setItems(list)
     } catch (err) {
-      console.error("[NotificationBell] getNotifications failed:", err)
+      console.error("[NotificationBell] list fetch failed:", err)
     } finally {
       setLoading(false)
     }
-  }, [userId])
+  }, [recipientId, isAdmin])
 
   // ---- Fetch unread count ----
   const refreshCount = React.useCallback(async () => {
+    if (recipientId === undefined) return
     try {
-      const n = await getUnreadCount(userId)
-      // 🔍 DEBUG — remove after diagnosis
-      console.log(
-        "[NotificationBell] server unread =",
-        n,
-        "for userId =",
-        userId
-      )
+      const n = isAdmin
+        ? await getAdminUnreadCount(recipientId)
+        : await getUnreadCount(recipientId)
       setUnread(n)
     } catch (err) {
-      // 🔍 DEBUG — remove after diagnosis
-      console.error("[NotificationBell] getUnreadCount failed:", err)
+      console.error("[NotificationBell] count fetch failed:", err)
     }
-  }, [userId])
+  }, [recipientId, isAdmin])
 
-  // ---- Initial load + polling ----
+  // ---- Initial + polling ----
   React.useEffect(() => {
+    if (recipientId === undefined) return
     void refreshCount()
     const id = setInterval(() => {
       if (document.visibilityState === "visible") void refreshCount()
     }, pollMs)
     return () => clearInterval(id)
-  }, [refreshCount, pollMs])
+  }, [refreshCount, pollMs, recipientId])
 
-  // ---- Fetch list when dropdown opens ----
+  // ---- Fetch on open ----
   React.useEffect(() => {
     if (open) void refreshList()
   }, [open, refreshList])
 
-  // ---- Re-check unread when tab regains focus ----
+  // ---- Visibility ----
   React.useEffect(() => {
     const onVis = () => {
       if (document.visibilityState === "visible") void refreshCount()
@@ -159,41 +153,47 @@ export function NotificationBell({ userId, pollMs = 30_000 }: Props) {
     return () => document.removeEventListener("visibilitychange", onVis)
   }, [refreshCount])
 
-  // ---- Handle click on a notification ----
   const handleClick = async (n: Notification) => {
-    if (!n.read_at) {
+    if (!n.read_at && recipientId !== undefined) {
       setItems((prev) =>
         prev.map((x) =>
           x.id === n.id ? { ...x, read_at: new Date().toISOString() } : x
         )
       )
       setUnread((prev) => Math.max(0, prev - 1))
-      void markAsRead(n.id, userId)
+      if (isAdmin) {
+        void markAdminNotificationAsRead(n.id, recipientId)
+      } else {
+        void markAsRead(n.id, recipientId)
+      }
     }
 
     setOpen(false)
-
-    if (n.link) {
-      router.push(n.link)
-    }
+    if (n.link) router.push(n.link)
   }
 
-  // ---- Mark all read ----
   const handleMarkAll = async (e: React.MouseEvent) => {
     e.preventDefault()
     e.stopPropagation()
-    if (markingAll || unread === 0) return
+    if (markingAll || unread === 0 || recipientId === undefined) return
 
     setMarkingAll(true)
     const now = new Date().toISOString()
     setItems((prev) => prev.map((x) => ({ ...x, read_at: x.read_at ?? now })))
     setUnread(0)
     try {
-      await markAllAsRead(userId)
+      if (isAdmin) {
+        await markAllAdminNotificationsAsRead(recipientId)
+      } else {
+        await markAllAsRead(recipientId)
+      }
     } finally {
       setMarkingAll(false)
     }
   }
+
+  // Don't render if we have no recipient
+  if (recipientId === undefined) return null
 
   return (
     <DropdownMenu open={open} onOpenChange={setOpen}>
@@ -218,7 +218,6 @@ export function NotificationBell({ userId, pollMs = 30_000 }: Props) {
         align="end"
         sideOffset={8}
       >
-        {/* Header */}
         <div className="flex items-center justify-between px-3 py-2.5 border-b border-gray-100 dark:border-gray-800">
           <div className="flex items-center gap-2">
             <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100">
@@ -246,7 +245,6 @@ export function NotificationBell({ userId, pollMs = 30_000 }: Props) {
           )}
         </div>
 
-        {/* Body */}
         <div className="max-h-[420px] overflow-y-auto">
           {loading && items.length === 0 ? (
             <div className="flex items-center justify-center py-10">
@@ -313,23 +311,6 @@ export function NotificationBell({ userId, pollMs = 30_000 }: Props) {
             </ul>
           )}
         </div>
-
-        {/* Footer */}
-        {items.length > 0 && (
-          <>
-            <DropdownMenuSeparator className="m-0" />
-            <DropdownMenuItem
-              onClick={(e) => {
-                e.preventDefault()
-                setOpen(false)
-                router.push("/dashboard/notifications")
-              }}
-              className="justify-center text-xs font-medium text-blue-600 dark:text-blue-400 rounded-none cursor-pointer"
-            >
-              View all notifications
-            </DropdownMenuItem>
-          </>
-        )}
       </DropdownMenuContent>
     </DropdownMenu>
   )
