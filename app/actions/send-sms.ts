@@ -612,7 +612,7 @@ export async function resolveGroupRecipients(
 }
 
 // ============================================================
-// Action — save the current send form as a draft campaign
+// Action — save the current send form as a draft campaigns
 // ============================================================
 
 export type SaveDraftInput = {
