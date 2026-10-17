@@ -4,6 +4,7 @@ import { sql } from "@/lib/db"
 import { getAdminSession } from "@/lib/admin-session"
 import { sms } from "@/lib/signalpulse-sms"
 import { hashPassword, generatePassword, generateUsername } from "@/lib/generate-credentials"
+import { decryptPhone } from "@/lib/phone-crypto"
 import { revalidatePath } from "next/cache"
 
 // ---------- Types ----------
@@ -189,7 +190,7 @@ export async function checkGatewayStatusAction(requestDbId: number): Promise<Adm
   }
 }
 
-// ---------- Action: Approve for user (creates the account + sends welcome email) ----------
+// ---------- Action: Approve for user (creates the account + sends welcome email + SMS) ----------
 
 export async function approveForUserAction(requestDbId: number): Promise<AdminActionResult> {
   const session = await getAdminSession()
@@ -211,12 +212,6 @@ export async function approveForUserAction(requestDbId: number): Promise<AdminAc
   if (request.status === "rejected") {
     return { success: false, error: "This request was rejected and cannot be approved." }
   }
-
-  // Optional guard: only allow approval if the gateway says Approved
-  // (Uncomment to enforce this)
-  // if (request.gateway_status !== "Approved") {
-  //   return { success: false, error: "Gateway has not approved this Sender ID yet." }
-  // }
 
   try {
     // Generate credentials
@@ -304,14 +299,35 @@ export async function approveForUserAction(requestDbId: number): Promise<AdminAc
         )
       }
     } catch (emailError) {
-      // Log but don't fail — admin still sees the credentials modal as backup
       console.error("[approveForUser] Welcome email threw:", emailError)
+    }
+
+    // ============================================================
+    // Send welcome SMS (NEW)
+    // ============================================================
+    try {
+      const userPhone = request.phone ? decryptPhone(request.phone) : null
+      
+      if (userPhone) {
+        const platformSenderId = process.env.SIGNALPULSE_SYSTEM_SENDER_ID || "CignalPulse"
+        
+        const smsResult = await sms.send({
+          recipients: [userPhone],
+          senderId: platformSenderId,
+          message: `Welcome to CignalPulse! Your Sender ID "${request.sender_id}" is approved. Log in at ${process.env.NEXT_PUBLIC_APP_URL || 'https://sms.cignalpulse.com'}/login`,
+        })
+
+        if (!smsResult.success) {
+          console.warn(`[approveForUser] Welcome SMS to ${userPhone} failed:`, smsResult.error)
+        }
+      }
+    } catch (smsError) {
+      console.error("[approveForUser] Welcome SMS threw:", smsError)
     }
 
     revalidatePath("/admin")
     revalidatePath("/admin/sender-ids")
 
-    // ⚠️ The plainPassword is shown ONCE — display in the UI so you can copy it
     return {
       success: true,
       message: `User created: ${username} (password: ${plainPassword})`,

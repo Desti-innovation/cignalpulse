@@ -12,6 +12,7 @@ import {
   validateRecipientArray,
 } from "@/lib/validation"
 import { revalidatePath } from "next/cache"
+import { decryptPhone } from "@/lib/phone-crypto" // 👈 Added decryption import
 
 // ============================================================
 // Types
@@ -137,19 +138,6 @@ export async function getUserSendContext(): Promise<UserSendContext | null> {
 // ============================================================
 // Main action — send SMS
 // ============================================================
-//
-// Credit handling model:
-//   1. Validate everything (inputs, gate, wallet balance)
-//   2. Verify sender ID is one of the user's approved IDs
-//   3. DEDUCT credits from the user's wallet FIRST
-//   4. If scheduled → insert row with status='scheduled' and return
-//   5. If immediate → call the SMS gateway
-//      - On failure → REFUND credits, return error
-//      - On success → insert campaign row with status='sent'
-//   6. If anything else throws after deduction → REFUND credits
-//
-// This guarantees: a user is only charged for a campaign that was
-// actually accepted by the gateway (or scheduled for later).
 
 export async function sendSmsAction(
   input: SendSmsInput
@@ -157,7 +145,6 @@ export async function sendSmsAction(
   const session = await getSession()
   if (!session) return { success: false, error: "Not authenticated." }
 
-  // ---- Rate limit by user (30/hour) ----
   const { limit, windowMs } = RateLimits.sendSms
   const rateCheck = rateLimit(`send:${session.userId}`, limit, windowMs)
 
@@ -191,9 +178,6 @@ export async function sendSmsAction(
 
   const recipients = recipientsCheck.value
   const message = input.message.trim()
-  // Preserve the EXACT case of the sender ID — mNotify's approval is
-  // case-sensitive. We store what the user submitted in
-  // sender_id_requests.sender_id, and must send the same string.
   const senderId = input.senderId.trim()
 
   // ---- Verify sender ID is one of the user's approved IDs ----
@@ -262,7 +246,7 @@ export async function sendSmsAction(
   }
 
   // ============================================================
-  // STEP 1 — Deduct credits FIRST (both scheduled and immediate)
+  // STEP 1 — Deduct credits FIRST
   // ============================================================
   try {
     await deductCreditsFromBatches(session.userId, totalCreditsNeeded)
@@ -352,7 +336,6 @@ export async function sendSmsAction(
       RETURNING id
     `
 
-    // Success — credits stay deducted
     creditsReserved = false
 
     revalidatePath("/dashboard")
@@ -598,21 +581,23 @@ export async function resolveGroupRecipients(
 
   if (safeIds.length === 0) return []
 
+  // 👈 UPDATE: Query the encrypted column, not the old plaintext one
   const rows = await sql`
-    SELECT DISTINCT c.phone
+    SELECT DISTINCT c.phone_encrypted
     FROM contacts c
     INNER JOIN contact_group_members m ON m.contact_id = c.id
     WHERE m.group_id = ANY(${safeIds}::int[])
       AND c.user_id = ${session.userId}
       AND c.is_active = true
-    ORDER BY c.phone
+    ORDER BY c.phone_encrypted
   `
 
-  return rows.map((r) => r.phone)
+  // 👈 UPDATE: Decrypt the numbers in memory before sending them to the gateway
+  return rows.map((r) => decryptPhone(r.phone_encrypted)).filter(Boolean)
 }
 
 // ============================================================
-// Action — save the current send form as a draft campaigns
+// Action — save the current send form as a draft campaign
 // ============================================================
 
 export type SaveDraftInput = {

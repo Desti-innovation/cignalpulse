@@ -2,6 +2,7 @@
 
 import { sql } from "@/lib/db"
 import { getAdminSession } from "@/lib/admin-session"
+import { decryptPhone } from "@/lib/phone-crypto" // 👈 Added
 
 export type SenderIdRequestDetail = {
   id: number
@@ -53,6 +54,9 @@ export async function getSenderIdRequestDetail(
 
   return {
     ...row,
+    // 👈 Decrypt the phone so the Admin UI can read it
+    phone: row.phone ? decryptPhone(row.phone) : "",
+    
     submitted_at: row.submitted_at instanceof Date ? row.submitted_at.toISOString() : String(row.submitted_at),
     approved_at: row.approved_at instanceof Date ? row.approved_at.toISOString() : (row.approved_at ? String(row.approved_at) : null),
     reviewed_at: row.reviewed_at instanceof Date ? row.reviewed_at.toISOString() : (row.reviewed_at ? String(row.reviewed_at) : null),

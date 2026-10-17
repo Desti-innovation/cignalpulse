@@ -3,6 +3,7 @@
 import { sql } from "@/lib/db"
 import { getSession } from "@/lib/session"
 import { revalidatePath } from "next/cache"
+import { encryptPhone, decryptPhone, hashPhone, normalizePhoneNumber } from "@/lib/phone-crypto"
 
 // ============================================================
 // Types
@@ -10,7 +11,7 @@ import { revalidatePath } from "next/cache"
 
 export type Contact = {
   id: number
-  phone: string
+  phone: string // Note: This is the DECRYPTED phone for the UI
   firstName: string | null
   lastName: string | null
   isActive: boolean
@@ -45,33 +46,36 @@ export async function listContacts(
   if (!session) return []
 
   const limit = Math.min(filters.limit ?? 200, 1000)
+  
+  // If the user is searching by phone, we need to hash the search term
+  // so we can search the blind index.
+  let searchHash: string | null = null
+  if (filters.search && /^[+\d\s()-]+$/.test(filters.search)) {
+    // Looks like a phone number, generate a hash
+    searchHash = hashPhone(filters.search)
+  }
 
-  // Base query with group membership aggregation
   const rows = await sql`
     SELECT 
       c.id,
-      c.phone,
+      c.phone_encrypted,
       c.first_name,
       c.last_name,
       c.is_active,
       c.opted_out_at,
       c.created_at,
-      COALESCE(
-        ARRAY_AGG(DISTINCT g.id) FILTER (WHERE g.id IS NOT NULL),
-        '{}'
-      ) AS group_ids,
-      COALESCE(
-        ARRAY_AGG(DISTINCT g.name) FILTER (WHERE g.name IS NOT NULL),
-        '{}'
-      ) AS group_names
+      COALESCE(ARRAY_AGG(DISTINCT g.id) FILTER (WHERE g.id IS NOT NULL), '{}') AS group_ids,
+      COALESCE(ARRAY_AGG(DISTINCT g.name) FILTER (WHERE g.name IS NOT NULL), '{}') AS group_names
     FROM contacts c
     LEFT JOIN contact_group_members m ON m.contact_id = c.id
     LEFT JOIN contact_groups g ON g.id = m.group_id
     WHERE c.user_id = ${session.userId}
-      AND (${filters.search ?? null}::text IS NULL
-           OR c.phone ILIKE ${"%" + (filters.search ?? "") + "%"}
-           OR c.first_name ILIKE ${"%" + (filters.search ?? "") + "%"}
-           OR c.last_name ILIKE ${"%" + (filters.search ?? "") + "%"})
+      AND (
+        ${filters.search ?? null}::text IS NULL
+        OR c.first_name ILIKE ${"%" + (filters.search ?? "") + "%"}
+        OR c.last_name ILIKE ${"%" + (filters.search ?? "") + "%"}
+        OR (${searchHash}::text IS NOT NULL AND c.phone_hash = ${searchHash})
+      )
       AND (${filters.status ?? "all"}::text = 'all'
            OR (${filters.status ?? "all"}::text = 'active' AND c.is_active = true)
            OR (${filters.status ?? "all"}::text = 'opted_out' AND c.is_active = false))
@@ -85,22 +89,15 @@ export async function listContacts(
     LIMIT ${limit}
   `
 
+  // Decrypt the phone numbers before sending to the UI
   return rows.map((r) => ({
     id: r.id,
-    phone: r.phone,
+    phone: decryptPhone(r.phone_encrypted), 
     firstName: r.first_name,
     lastName: r.last_name,
     isActive: r.is_active,
-    optedOutAt:
-      r.opted_out_at instanceof Date
-        ? r.opted_out_at.toISOString()
-        : r.opted_out_at
-        ? String(r.opted_out_at)
-        : null,
-    createdAt:
-      r.created_at instanceof Date
-        ? r.created_at.toISOString()
-        : String(r.created_at),
+    optedOutAt: r.opted_out_at instanceof Date ? r.opted_out_at.toISOString() : r.opted_out_at ? String(r.opted_out_at) : null,
+    createdAt: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
     groupIds: (r.group_ids as number[]) ?? [],
     groupNames: (r.group_names as string[]) ?? [],
   }))
@@ -157,20 +154,21 @@ export async function createContactAction(formData: FormData): Promise<{
 
   if (!rawPhone) return { success: false, error: "Phone number is required." }
 
-  // Normalize the phone using our helper
-  const { normalizePhone } = await import("@/lib/phone")
-  const result = normalizePhone(rawPhone)
-  if (!result.valid || !result.normalized) {
-    return { success: false, error: result.reason || "Invalid phone number." }
+  // Normalize, Encrypt, and Hash
+  const normalizedPhone = normalizePhoneNumber(rawPhone)
+  if (!normalizedPhone) {
+    return { success: false, error: "Invalid phone number." }
   }
-  const normalizedPhone = result.normalized
+  
+  const encryptedPhone = encryptPhone(normalizedPhone)
+  const phoneHash = hashPhone(normalizedPhone)
 
   try {
-    // Insert contact (or get existing on conflict)
+    // Insert contact (or get existing on conflict based on the HASH)
     const [contact] = await sql`
-      INSERT INTO contacts (user_id, phone, first_name, last_name)
-      VALUES (${session.userId}, ${normalizedPhone}, ${firstName}, ${lastName})
-      ON CONFLICT (user_id, phone) DO UPDATE
+      INSERT INTO contacts (user_id, phone_encrypted, phone_hash, first_name, last_name)
+      VALUES (${session.userId}, ${encryptedPhone}, ${phoneHash}, ${firstName}, ${lastName})
+      ON CONFLICT (user_id, phone_hash) DO UPDATE
         SET first_name = COALESCE(EXCLUDED.first_name, contacts.first_name),
             last_name = COALESCE(EXCLUDED.last_name, contacts.last_name),
             updated_at = NOW()
@@ -214,18 +212,20 @@ export async function updateContactAction(
 
   if (!rawPhone) return { success: false, error: "Phone number is required." }
 
-  const { normalizePhone } = await import("@/lib/phone")
-  const result = normalizePhone(rawPhone)
-  if (!result.valid || !result.normalized) {
-    return { success: false, error: result.reason || "Invalid phone number." }
+  const normalizedPhone = normalizePhoneNumber(rawPhone)
+  if (!normalizedPhone) {
+    return { success: false, error: "Invalid phone number." }
   }
+
+  const encryptedPhone = encryptPhone(normalizedPhone)
+  const phoneHash = hashPhone(normalizedPhone)
 
   try {
     // Check phone isn't in use by another contact
     const [conflict] = await sql`
       SELECT id FROM contacts
       WHERE user_id = ${session.userId}
-        AND phone = ${result.normalized}
+        AND phone_hash = ${phoneHash}
         AND id != ${contactId}
       LIMIT 1
     `
@@ -235,7 +235,8 @@ export async function updateContactAction(
 
     await sql`
       UPDATE contacts
-      SET phone = ${result.normalized},
+      SET phone_encrypted = ${encryptedPhone},
+          phone_hash = ${phoneHash},
           first_name = ${firstName},
           last_name = ${lastName},
           updated_at = NOW()

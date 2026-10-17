@@ -2,7 +2,7 @@
 
 import { sql } from "@/lib/db"
 import { revalidatePath } from "next/cache"
-import { rateLimit, RateLimits, getClientIp } from "@/lib/rate-limit"
+import { rateLimit, RateLimits } from "@/lib/rate-limit"
 import {
   validateSenderId,
   validateEmail,
@@ -12,6 +12,7 @@ import {
   sanitizeText,
 } from "@/lib/validation"
 import { headers } from "next/headers"
+import { encryptPhone } from "@/lib/phone-crypto" // 👈 Import encryption
 
 export type SenderIdRequestInput = {
   senderId: string
@@ -42,7 +43,7 @@ export async function submitSenderIdRequest(data: SenderIdRequestInput) {
     if (!rateCheck.allowed) {
       return {
         success: false,
-        error: `Too many requests. Please try again in ${rateCheck.retryAfterSeconds} seconds.`,
+        error: `Too many requests. Please try again in ${rateCheck.retryAfterSeconds ?? 60} seconds.`,
       }
     }
   } catch {
@@ -92,13 +93,19 @@ export async function submitSenderIdRequest(data: SenderIdRequestInput) {
   }
 
   // ---- Sanitize text fields ----
-  const senderId = data.senderId.trim().toUpperCase()
+  // 👈 REMOVED .toUpperCase() so "DesTech" stays "DesTech"
+  const senderId = data.senderId.trim() 
   const companyName = sanitizeText(data.companyName.trim(), 200)
   const email = data.email.trim().toLowerCase()
-  const phone = data.phone.trim()
   const useCase = sanitizeText(data.useCase.trim(), 200)
   const website = data.website.trim()
   const notes = data.notes ? sanitizeText(data.notes, 2000) : null
+
+  // 👈 ENCRYPT THE PHONE NUMBER
+  const encryptedPhone = encryptPhone(data.phone.trim())
+  if (!encryptedPhone) {
+    return { success: false, error: "Failed to process phone number." }
+  }
 
   try {
     const requestId = generateRequestId()
@@ -108,7 +115,7 @@ export async function submitSenderIdRequest(data: SenderIdRequestInput) {
         request_id, sender_id, company_name, email, phone,
         use_case, website, notes, status
       ) VALUES (
-        ${requestId}, ${senderId}, ${companyName}, ${email}, ${phone},
+        ${requestId}, ${senderId}, ${companyName}, ${email}, ${encryptedPhone},
         ${useCase}, ${website}, ${notes}, 'pending'
       )
       RETURNING id, request_id, expected_at
