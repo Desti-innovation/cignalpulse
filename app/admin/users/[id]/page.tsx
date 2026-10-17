@@ -1,5 +1,4 @@
 import { redirect, notFound } from "next/navigation"
-import { sql } from "@/lib/db"
 import { getAdminSession } from "@/lib/admin-session"
 import AdminContent from "@/components/admin-content"
 import {
@@ -25,11 +24,6 @@ export default async function AdminUserDetailPage({
   const session = await getAdminSession()
   if (!session) redirect("/admin/login")
 
-  const [admin] = await sql`
-    SELECT id, username, email, full_name FROM admins WHERE id = ${session.adminId} LIMIT 1
-  `
-  if (!admin) redirect("/admin/login")
-
   const [user, campaigns, transactions, redFlags, adjustments] = await Promise.all([
     getUserDetail(userId),
     getUserCampaigns(userId, 10),
@@ -42,11 +36,6 @@ export default async function AdminUserDetailPage({
 
   return (
     <AdminContent
-      admin={{
-        fullName: admin.full_name,
-        email: admin.email,
-        username: admin.username,
-      }}
       breadcrumbs={[
         { label: "Admin", href: "/admin" },
         { label: "All Users", href: "/admin/users" },

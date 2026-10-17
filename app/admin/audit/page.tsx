@@ -54,11 +54,6 @@ const [logs, stats] = await Promise.all([listAuditLogs({ limit: 200 }), getAudit
 
   return (
     <AdminContent
-      admin={{
-        fullName: admin.full_name,
-        email: admin.email,
-        username: admin.username,
-      }}
       breadcrumbs={[
         { label: "Admin", href: "/admin" },
         { label: "Audit Logs" },
