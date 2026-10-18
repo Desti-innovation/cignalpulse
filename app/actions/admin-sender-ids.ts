@@ -86,7 +86,11 @@ export async function getSenderIdStats() {
 
 // ---------- Action: Submit request to the gateway ----------
 
-export async function submitToGatewayAction(requestDbId: number): Promise<AdminActionResult> {
+export async function submitToGatewayAction(
+  requestDbId: number,
+  editedSenderId?: string,
+  editedUseCase?: string
+): Promise<AdminActionResult> {
   const session = await getAdminSession()
   if (!session) return { success: false, error: "Not authenticated as admin." }
 
@@ -103,10 +107,23 @@ export async function submitToGatewayAction(requestDbId: number): Promise<AdminA
     return { success: false, error: "This request has already been resolved." }
   }
 
+  // Use edited values if provided, otherwise fall back to stored values
+  const senderIdToSubmit = editedSenderId?.trim() || request.sender_id
+  const useCaseToSubmit = editedUseCase?.trim() || request.use_case || "Business messaging"
+
+  // If values changed, update the DB first
+  if (senderIdToSubmit !== request.sender_id || useCaseToSubmit !== request.use_case) {
+    await sql`
+      UPDATE sender_id_requests
+      SET sender_id = ${senderIdToSubmit}, use_case = ${useCaseToSubmit}
+      WHERE id = ${request.id}
+    `
+  }
+
   // Call the SignalPulse SMS gateway
   const result = await sms.registerSenderIdRaw(
-    request.sender_id,
-    request.use_case || "Business messaging"
+    senderIdToSubmit,
+    useCaseToSubmit
   )
 
   // Log the gateway interaction
@@ -142,7 +159,7 @@ export async function submitToGatewayAction(requestDbId: number): Promise<AdminA
 
   return {
     success: true,
-    message: `Submitted "${request.sender_id}" to the network. Current status: ${result.gatewayStatus}`,
+    message: `Submitted "${senderIdToSubmit}" to the network. Current status: ${result.gatewayStatus}`,
   }
 }
 
@@ -265,9 +282,7 @@ export async function approveForUserAction(requestDbId: number): Promise<AdminAc
       )
     `
 
-    // ============================================================
     // Send welcome email with credentials
-    // ============================================================
     try {
       const { sendEmail } = await import("@/lib/email")
       const { renderWelcomeEmail } = await import("@/lib/email-templates/welcome")
@@ -302,9 +317,7 @@ export async function approveForUserAction(requestDbId: number): Promise<AdminAc
       console.error("[approveForUser] Welcome email threw:", emailError)
     }
 
-    // ============================================================
-    // Send welcome SMS (NEW)
-    // ============================================================
+    // Send welcome SMS
     try {
       const userPhone = request.phone ? decryptPhone(request.phone) : null
       

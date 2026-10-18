@@ -14,18 +14,10 @@ import "server-only"
 const GATEWAY_BASE_URL = "https://api.mnotify.com/api"
 
 // ---------- Key handling (defensive) ----------
-//
-// Strip surrounding quotes and whitespace so a config like:
-//   SIGNALPULSE_SMS_KEY=""
-// or
-//   SIGNALPULSE_SMS_KEY="abc123"
-// or a Windows CRLF-corrupted file
-// all behave predictably.
 
 const RAW_KEY = process.env.SIGNALPULSE_SMS_KEY ?? ""
 const GATEWAY_KEY = RAW_KEY.replace(/^["']|["']$/g, "").trim()
 
-// Debug — remove after verifying the key loads correctly
 console.log(
   "[SMS] GATEWAY_KEY length:",
   GATEWAY_KEY.length,
@@ -111,7 +103,6 @@ async function gatewayRequest<T>(
     cache: "no-store",
   })
 
-  // ---- Read the body FIRST so we can log it on failure ----
   const text = await res.text()
 
   let parsed: unknown = null
@@ -122,7 +113,6 @@ async function gatewayRequest<T>(
   }
 
   if (!res.ok) {
-    // Debug log the raw response so we can see WHY the gateway rejected us
     console.error(
       `[SMS gateway] ${method} ${endpoint} → HTTP ${res.status} ${res.statusText}`
     )
@@ -222,35 +212,13 @@ export const sms = {
     senderId: string,
     purpose: string
   ): Promise<{ success: boolean; error?: string }> {
-    try {
-      const response = await gatewayRequest<{
-        summary: { sender_name: string; status: string }
-      }>("POST", "/senderid/register", {
-        sender_name: senderId,
-        purpose,
-      })
-
-      if (response.status !== "success") {
-        return {
-          success: false,
-          error: response.message || "Registration failed",
-        }
-      }
-
-      return { success: true }
-    } catch (error) {
-      console.error(
-        "[CignalPulse SMS] Sender ID registration failed:",
-        error
-      )
-      return { success: false, error: "Unable to register Sender ID." }
-    }
+    const result = await this.registerSenderIdRaw(senderId, purpose)
+    return { success: result.status === "success", error: result.error }
   },
 
   /**
    * Raw sender ID registration — returns the full gateway response so the
-   * admin layer can log it for audit purposes. Prefer `registerSenderId`
-   * for user-facing logic.
+   * admin layer can log it for audit purposes.
    */
   async registerSenderIdRaw(
     senderId: string,
@@ -262,11 +230,28 @@ export const sms = {
     error?: string
   }> {
     try {
+      const cleanSenderId = senderId.replace(/[^a-zA-Z0-9]/g, "")
+
+      let mnotifyPurpose = "For Sending SMS Notifications"
+      
+      const lowerPurpose = (purpose || "").toLowerCase()
+      if (lowerPurpose.includes("transactional") || lowerPurpose.includes("otp")) {
+        mnotifyPurpose = "For Sending Transactional Messages and OTPs"
+      } else if (lowerPurpose.includes("marketing") || lowerPurpose.includes("promo")) {
+        mnotifyPurpose = "For Sending Marketing and Promotional Messages"
+      } else if (lowerPurpose.includes("customer") || lowerPurpose.includes("support")) {
+        mnotifyPurpose = "For Customer Support and Updates"
+      } else if (lowerPurpose.includes("mixed")) {
+        mnotifyPurpose = "For Mixed Business Messaging"
+      } else if (purpose && purpose.length > 5) {
+        mnotifyPurpose = purpose.slice(0, 50)
+      }
+
       const response = await gatewayRequest<{
         summary: { sender_name: string; status: string }
       }>("POST", "/senderid/register", {
-        sender_name: senderId,
-        purpose,
+        sender_name: cleanSenderId,
+        purpose: mnotifyPurpose,
       })
 
       const gatewayStatusRaw = response.summary?.status
@@ -288,6 +273,18 @@ export const sms = {
         "[CignalPulse SMS] Sender ID registration failed:",
         error
       )
+
+      const isHtmlCrash = error instanceof Error && error.message.includes("<!DOCTYPE html>")
+      
+      if (isHtmlCrash) {
+        return {
+          status: "error",
+          gatewayStatus: "Unknown",
+          raw: { error: "mNotify server crashed (500)." },
+          error: "mNotify rejected this specific name. It is likely already registered on their network. Try a slightly different name (e.g., GREATJOYGH) or check your mNotify dashboard.",
+        }
+      }
+
       return {
         status: "error",
         gatewayStatus: "Unknown",
@@ -326,8 +323,7 @@ export const sms = {
 
   /**
    * Raw sender ID status check — returns the full gateway response so the
-   * admin layer can log it for audit purposes. Prefer `getSenderIdStatus`
-   * for user-facing logic.
+   * admin layer can log it for audit purposes.
    */
   async getSenderIdStatusRaw(senderId: string): Promise<{
     status: "success" | "error"

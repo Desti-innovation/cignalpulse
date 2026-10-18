@@ -4,6 +4,8 @@ import * as React from "react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -112,6 +114,10 @@ export function SenderIdDetailView({ request, logs }: Props) {
   } | null>(null)
   const [selectedLog, setSelectedLog] = React.useState<GatewayLog | null>(null)
 
+  // State for the editable fields
+  const [editedSenderId, setEditedSenderId] = React.useState(request.sender_id)
+  const [editedUseCase, setEditedUseCase] = React.useState(request.use_case)
+
   React.useEffect(() => {
     if (!toast) return
     const t = setTimeout(() => setToast(null), 5000)
@@ -157,6 +163,13 @@ export function SenderIdDetailView({ request, logs }: Props) {
     router.refresh()
   }
 
+  // Custom handler for the edit-and-submit flow
+  const handleSubmitToNetwork = async () => {
+    await runAction("submit", () =>
+      submitToGatewayAction(request.id, editedSenderId, editedUseCase)
+    )
+  }
+
   return (
     <div className="flex flex-1 flex-col gap-6 p-6">
       {/* Back bar */}
@@ -198,32 +211,6 @@ export function SenderIdDetailView({ request, logs }: Props) {
               <RefreshCw className="size-4" />
               Check Network Status
             </DropdownMenuItem>
-
-            {request.status === "pending" && (
-              <DropdownMenuItem
-                className="cursor-pointer"
-                disabled={busy !== null}
-                onClick={() =>
-                  runAction("submit", () => submitToGatewayAction(request.id))
-                }
-              >
-                <Send className="size-4" />
-                Submit to Network
-              </DropdownMenuItem>
-            )}
-
-            {request.status === "submitted" && (
-              <DropdownMenuItem
-                className="cursor-pointer"
-                disabled={busy !== null}
-                onClick={() =>
-                  runAction("submit", () => submitToGatewayAction(request.id))
-                }
-              >
-                <Send className="size-4" />
-                Re-submit
-              </DropdownMenuItem>
-            )}
 
             <DropdownMenuSeparator />
 
@@ -300,6 +287,50 @@ export function SenderIdDetailView({ request, logs }: Props) {
         </div>
       </div>
 
+      {/* Editable Submit Form (Only for Pending) */}
+      {request.status === "pending" && (
+        <div className="rounded-xl bg-blue-50 dark:bg-blue-950/20 border border-blue-200 dark:border-blue-900 p-6">
+          <h2 className="text-lg font-bold text-blue-900 dark:text-blue-100 mb-2">
+            Review Before Submitting
+          </h2>
+          <p className="text-sm text-blue-800 dark:text-blue-300 mb-5">
+            Verify the Sender ID and Use Case. You can edit them below before sending to mNotify.
+          </p>
+
+          <div className="grid gap-4 max-w-lg">
+            <div>
+              <Label className="text-blue-900 dark:text-blue-100">Sender ID</Label>
+              <Input 
+                value={editedSenderId}
+                onChange={(e) => setEditedSenderId(e.target.value)}
+                className="mt-1 bg-white dark:bg-gray-900"
+              />
+            </div>
+            <div>
+              <Label className="text-blue-900 dark:text-blue-100">Use Case / Purpose</Label>
+              <Input 
+                value={editedUseCase}
+                onChange={(e) => setEditedUseCase(e.target.value)}
+                className="mt-1 bg-white dark:bg-gray-900"
+              />
+            </div>
+
+            <Button 
+              onClick={handleSubmitToNetwork} 
+              disabled={busy !== null}
+              className="w-full bg-blue-600 hover:bg-blue-700 text-white mt-2 h-11"
+            >
+              {busy === "submit" ? (
+                <Loader2 className="size-4 animate-spin mr-2" />
+              ) : (
+                <Send className="size-4 mr-2" />
+              )}
+              Save & Submit to Network
+            </Button>
+          </div>
+        </div>
+      )}
+
       {/* Info grid */}
       <div className="grid gap-6 lg:grid-cols-3">
         <div className="lg:col-span-2 rounded-xl bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 p-6">
@@ -325,8 +356,8 @@ export function SenderIdDetailView({ request, logs }: Props) {
             <InfoRow
               icon={<Globe className="size-4" />}
               label="Website"
-              value={request.website}
-              link={request.website}
+              value={request.website || "N/A"}
+              link={request.website || undefined}
             />
             <InfoRow
               icon={<FileText className="size-4" />}

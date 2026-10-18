@@ -29,7 +29,7 @@ import {
   Mail,
   Phone
 } from "lucide-react"
-import { submitSenderIdRequest } from "@/app/actions/sender-id"
+import { submitSenderIdRequest } from "@/app/actions/sender-id-request"
 
 export function SenderIdForm({
   className,
@@ -56,14 +56,13 @@ export function SenderIdForm({
 
     const formData = new FormData(e.currentTarget)
 
-    // Call the server action → saves to Neon
     const result = await submitSenderIdRequest({
       senderId: senderId,
       companyName: formData.get("companyName") as string,
       email: formData.get("email") as string,
       phone: formData.get("phone") as string,
       useCase: useCase,
-      website: formData.get("website") as string,
+      website: (formData.get("website") as string) || undefined,
       notes: (formData.get("notes") as string) || undefined,
     })
 
@@ -73,8 +72,7 @@ export function SenderIdForm({
       return
     }
 
-    // ✅ Redirect to the LOADING page (which then redirects to status)
-    router.push(`/loading?requestId=${result.requestId}`)
+    router.push(`/sender-id-status?id=${result.requestId}`)
   }
 
   return (
@@ -194,11 +192,11 @@ export function SenderIdForm({
           </Select>
         </Field>
 
-        {/* Website */}
+        {/* Website (Optional) */}
         <Field>
           <FieldLabel htmlFor="website" className="flex items-center gap-2">
             <Globe className="size-4 text-gray-500" />
-            Website / Business Link
+            Website / Business Link <span className="text-muted-foreground font-normal">(optional)</span>
           </FieldLabel>
           <Input
             id="website"
@@ -206,10 +204,9 @@ export function SenderIdForm({
             type="url"
             placeholder="https://yourbusiness.com"
             className="h-12 border-gray-300 focus-visible:ring-blue-600"
-            required
           />
           <FieldDescription>
-            Required for regulatory approval and verification.
+            Helps speed up regulatory approval, but not strictly required.
           </FieldDescription>
         </Field>
 

@@ -1,5 +1,4 @@
 import { redirect } from "next/navigation"
-import { sql } from "@/lib/db"
 import { getAdminSession } from "@/lib/admin-session"
 import AdminContent from "@/components/admin-content"
 import { SenderIdRequestsTable } from "@/components/admin/sender-id-requests-table"
@@ -10,11 +9,6 @@ export const dynamic = "force-dynamic"
 export default async function SenderIdRequestsPage() {
   const session = await getAdminSession()
   if (!session) redirect("/admin/login")
-
-  const [admin] = await sql`
-    SELECT id, username, email, full_name FROM admins WHERE id = ${session.adminId} LIMIT 1
-  `
-  if (!admin) redirect("/admin/login")
 
   const requests = await listSenderIdRequests()
 
