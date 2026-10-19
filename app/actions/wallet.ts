@@ -8,7 +8,7 @@ import { headers } from "next/headers"
 import { createNotification } from "@/app/actions/notifications"
 
 // ============================================================
-// Types (unchanged)
+// Types
 // ============================================================
 
 export type WalletBundle = {
@@ -48,15 +48,11 @@ export type WalletData = {
   } | null
 }
 
-// ============================================================
-// Thresholds for notifications
-// ============================================================
-
 const LOW_BALANCE_GHS = 10
 const LOW_CREDITS = 50
 
 // ============================================================
-// Read — fetch everything the wallet page needs (unchanged)
+// Read — fetch wallet data
 // ============================================================
 
 export async function getWalletData(): Promise<WalletData | null> {
@@ -158,7 +154,7 @@ export async function getWalletData(): Promise<WalletData | null> {
 }
 
 // ============================================================
-// Action — Initialize a top-up (unchanged)
+// Action — Initialize Topup
 // ============================================================
 
 export type InitializeTopupResult = {
@@ -251,7 +247,7 @@ export async function initializeTopupAction(
 }
 
 // ============================================================
-// Action — Verify a payment (idempotent) — UPDATED
+// Action — Verify Payment (with Retry Logic)
 // ============================================================
 
 export type VerifyPaymentResult = {
@@ -269,7 +265,6 @@ export async function verifyPaystackPayment(
   }
 
   try {
-    // 1. Find the intent
     const [intent] = await sql`
       SELECT id, user_id, amount_credited_ghs, status
       FROM paystack_intents
@@ -281,7 +276,6 @@ export async function verifyPaystackPayment(
       return { success: false, error: "Payment not found." }
     }
 
-    // 2. Idempotent — if already processed, don't double credit
     if (intent.status === "success") {
       return {
         success: true,
@@ -290,13 +284,32 @@ export async function verifyPaystackPayment(
       }
     }
 
-    // 3. Verify with Paystack
-    const verification = await paystack.verifyTransaction(reference)
+    let verification
+    let retries = 3
 
-    if (!verification.status || !verification.data) {
+    while (retries > 0) {
+      try {
+        verification = await paystack.verifyTransaction(reference)
+        
+        if (verification.data?.status === "success") break
+        if (verification.data?.status === "failed" || verification.data?.status === "abandoned") break
+
+        console.log(`[Paystack Verify] Status: ${verification.data?.status}. Retrying...`)
+        await new Promise((resolve) => setTimeout(resolve, 2000))
+        retries--
+      } catch (err) {
+        console.error(`[Paystack Verify] Retry ${4 - retries} failed:`, err)
+        await new Promise((resolve) => setTimeout(resolve, 2000))
+        retries--
+      }
+    }
+
+    console.log("[Paystack Verify] Final Response:", JSON.stringify(verification, null, 2))
+
+    if (!verification || !verification.status || !verification.data) {
       return {
         success: false,
-        error: verification.message || "Paystack verification failed.",
+        error: verification?.message || "Paystack verification failed.",
       }
     }
 
@@ -309,7 +322,6 @@ export async function verifyPaystackPayment(
         WHERE id = ${intent.id}
       `
 
-      //  Payment failed notification
       try {
         await createNotification({
           userId: intent.user_id,
@@ -328,7 +340,6 @@ export async function verifyPaystackPayment(
       }
     }
 
-    // 4. Credit the wallet in a transaction
     const amountCredited = Number(intent.amount_credited_ghs)
 
     await sql`
@@ -340,7 +351,6 @@ export async function verifyPaystackPayment(
       WHERE user_id = ${intent.user_id}
     `
 
-    // 5. Log the transaction
     await sql`
       INSERT INTO transactions (
         reference, type, user_id, amount_ghs, credits, gateway, status,
@@ -361,7 +371,6 @@ export async function verifyPaystackPayment(
       ON CONFLICT (reference) DO NOTHING
     `
 
-    // 6. Update the intent
     await sql`
       UPDATE paystack_intents
       SET 
@@ -371,7 +380,6 @@ export async function verifyPaystackPayment(
       WHERE id = ${intent.id}
     `
 
-    //  Success notification (isolated — never breaks the top-up)
     try {
       await createNotification({
         userId: intent.user_id,
@@ -398,7 +406,7 @@ export async function verifyPaystackPayment(
 }
 
 // ============================================================
-// Action — Purchase a bundle from wallet balance — UPDATED
+// Action — Purchase Bundle
 // ============================================================
 
 export type PurchaseBundleResult = {
@@ -416,7 +424,6 @@ export async function purchaseBundleAction(
   if (!session) return { success: false, error: "Not authenticated." }
 
   try {
-    // 1. Fetch the bundle
     const [bundle] = await sql`
       SELECT id, name, credits, price_ghs, bonus_credits, bundle_type, validity_days, is_active
       FROM sms_bundles
@@ -431,7 +438,6 @@ export async function purchaseBundleAction(
     const price = Number(bundle.price_ghs)
     const totalCredits = bundle.credits + bundle.bonus_credits
 
-    // 2. Check wallet balance
     const [wallet] = await sql`
       SELECT balance_ghs, sms_credits
       FROM user_wallets
@@ -446,7 +452,6 @@ export async function purchaseBundleAction(
       }
     }
 
-    // 3. Compute expiry timestamp
     let expiresAt: string | null = null
     if (bundle.bundle_type === "expiry" && bundle.validity_days) {
       const d = new Date()
@@ -456,7 +461,6 @@ export async function purchaseBundleAction(
 
     const reference = `BNDL-${session.userId}-${Date.now()}`
 
-    // 4. Deduct balance, add credits
     await sql`
       UPDATE user_wallets
       SET 
@@ -466,7 +470,6 @@ export async function purchaseBundleAction(
       WHERE user_id = ${session.userId}
     `
 
-    // 5. Create credit batch
     await sql`
       INSERT INTO user_credit_batches (
         user_id, bundle_id, bundle_name, credits_purchased, credits_remaining, expires_at
@@ -480,7 +483,6 @@ export async function purchaseBundleAction(
       )
     `
 
-    // 6. Log the transaction
     await sql`
       INSERT INTO transactions (
         reference, type, user_id, bundle_id, amount_ghs, credits, bonus_credits,
@@ -500,7 +502,6 @@ export async function purchaseBundleAction(
       )
     `
 
-    // 7. Fetch new values
     const [updated] = await sql`
       SELECT balance_ghs, sms_credits FROM user_wallets WHERE user_id = ${session.userId} LIMIT 1
     `
@@ -508,7 +509,6 @@ export async function purchaseBundleAction(
     const newBalance = Number(updated.balance_ghs)
     const newCredits = Number(updated.sms_credits)
 
-    //  Bundle purchase success notification (isolated)
     try {
       const bonusText =
         bundle.bonus_credits > 0
@@ -523,7 +523,6 @@ export async function purchaseBundleAction(
         link: "/dashboard/wallet",
       })
 
-      //  Low balance / low credits warnings (only fire if actually low)
       if (newBalance < LOW_BALANCE_GHS) {
         await createNotification({
           userId: session.userId,
