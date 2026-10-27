@@ -342,13 +342,14 @@ export async function verifyPaystackPayment(
 
     const amountCredited = Number(intent.amount_credited_ghs)
 
+    // THE FIX: Using INSERT ... ON CONFLICT instead of UPDATE
     await sql`
-      UPDATE user_wallets
-      SET 
-        balance_ghs = balance_ghs + ${amountCredited},
-        lifetime_topup_ghs = lifetime_topup_ghs + ${amountCredited},
+      INSERT INTO user_wallets (user_id, balance_ghs, lifetime_topup_ghs, sms_credits)
+      VALUES (${intent.user_id}, ${amountCredited}, ${amountCredited}, 0)
+      ON CONFLICT (user_id) DO UPDATE SET
+        balance_ghs = user_wallets.balance_ghs + ${amountCredited},
+        lifetime_topup_ghs = user_wallets.lifetime_topup_ghs + ${amountCredited},
         updated_at = NOW()
-      WHERE user_id = ${intent.user_id}
     `
 
     await sql`
