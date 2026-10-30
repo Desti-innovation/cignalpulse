@@ -3,6 +3,7 @@
 import { sql } from "@/lib/db"
 import { getSession } from "@/lib/session"
 import { normalizePhone } from "@/lib/phone"
+import { encryptPhone, hashPhone } from "@/lib/phone-crypto"
 import { revalidatePath } from "next/cache"
 
 // ============================================================
@@ -52,7 +53,6 @@ export async function importContactsAction(
     }
   }
 
-  // Track counts
   let imported = 0
   let skipped = 0
   let updated = 0
@@ -61,6 +61,8 @@ export async function importContactsAction(
   // Validate + normalize rows
   const cleanRows: Array<{
     phone: string
+    encrypted: string
+    hash: string
     firstName: string | null
     lastName: string | null
   }> = []
@@ -85,6 +87,8 @@ export async function importContactsAction(
 
     cleanRows.push({
       phone: normalized,
+      encrypted: encryptPhone(normalized),
+      hash: hashPhone(normalized),
       firstName: row.firstName?.trim() || null,
       lastName: row.lastName?.trim() || null,
     })
@@ -98,16 +102,17 @@ export async function importContactsAction(
   }
 
   try {
-    // ---- Fetch existing contacts for these phones ----
-    const phones = cleanRows.map((r) => r.phone)
+    // ---- Fetch existing contacts using the HASH ----
+    const hashes = cleanRows.map((r) => r.hash)
     const existing = await sql`
-      SELECT id, phone FROM contacts
+      SELECT id, phone_hash FROM contacts
       WHERE user_id = ${session.userId}
-        AND phone = ANY(${phones}::text[])
+        AND phone_hash = ANY(${hashes}::text[])
     `
+    
     const existingMap = new Map<string, number>()
     for (const e of existing) {
-      existingMap.set(e.phone, e.id)
+      existingMap.set(e.phone_hash, e.id)
     }
 
     // ---- Split into inserts vs updates/skips ----
@@ -115,7 +120,7 @@ export async function importContactsAction(
     const toUpdate: Array<typeof cleanRows[number] & { id: number }> = []
 
     for (const row of cleanRows) {
-      const existingId = existingMap.get(row.phone)
+      const existingId = existingMap.get(row.hash)
       if (existingId) {
         if (options.duplicateHandling === "update") {
           toUpdate.push({ ...row, id: existingId })
@@ -129,24 +134,26 @@ export async function importContactsAction(
 
     // ---- Batch insert new contacts ----
     if (toInsert.length > 0) {
-      // Use unnest for efficient bulk insert
-      const phones = toInsert.map((r) => r.phone)
+      const encryptedPhones = toInsert.map((r) => r.encrypted)
+      const hashes = toInsert.map((r) => r.hash)
       const firstNames = toInsert.map((r) => r.firstName)
       const lastNames = toInsert.map((r) => r.lastName)
 
       await sql`
-        INSERT INTO contacts (user_id, phone, first_name, last_name)
+        INSERT INTO contacts (user_id, phone_encrypted, phone_hash, first_name, last_name)
         SELECT 
           ${session.userId},
-          phone,
+          encrypted,
+          hash,
           first_name,
           last_name
         FROM unnest(
-          ${phones}::text[],
+          ${encryptedPhones}::text[],
+          ${hashes}::text[],
           ${firstNames}::text[],
           ${lastNames}::text[]
-        ) AS t(phone, first_name, last_name)
-        ON CONFLICT (user_id, phone) DO NOTHING
+        ) AS t(encrypted, hash, first_name, last_name)
+        ON CONFLICT (user_id, phone_hash) DO NOTHING
       `
 
       imported = toInsert.length
@@ -169,7 +176,6 @@ export async function importContactsAction(
     // ---- Add all imported/updated contacts to the selected group ----
     let addedToGroup = 0
     if (options.addToGroupId) {
-      // Verify group belongs to user
       const [group] = await sql`
         SELECT id FROM contact_groups
         WHERE id = ${options.addToGroupId} AND user_id = ${session.userId}
@@ -177,18 +183,18 @@ export async function importContactsAction(
       `
 
       if (group) {
-        const allPhones = cleanRows.map((r) => r.phone)
-        // Fetch all contact IDs for these phones
+        const allHashes = cleanRows.map((r) => r.hash)
+        
+        // Fetch all contact IDs for these hashes
         const contactRows = await sql`
           SELECT id FROM contacts
           WHERE user_id = ${session.userId}
-            AND phone = ANY(${allPhones}::text[])
+            AND phone_hash = ANY(${allHashes}::text[])
         `
 
         const contactIds = contactRows.map((c) => c.id)
 
         if (contactIds.length > 0) {
-          // Bulk insert memberships
           const result = await sql`
             INSERT INTO contact_group_members (contact_id, group_id)
             SELECT id, ${options.addToGroupId}
@@ -198,7 +204,6 @@ export async function importContactsAction(
           `
           addedToGroup = result.length
 
-          // Recalc group count
           await sql`
             UPDATE contact_groups
             SET contact_count = (
