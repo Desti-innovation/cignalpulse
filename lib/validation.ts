@@ -66,6 +66,7 @@ export function validateSenderId(senderId: string): {
   if (trimmed.length > 11) {
     return { valid: false, error: "Sender ID must be 11 characters or less." }
   }
+  // STRICT: Letters and numbers only. No spaces allowed for new requests.
   if (!/^[A-Z0-9]+$/.test(trimmed)) {
     return {
       valid: false,

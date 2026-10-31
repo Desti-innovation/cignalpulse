@@ -12,7 +12,7 @@ import {
   validateRecipientArray,
 } from "@/lib/validation"
 import { revalidatePath } from "next/cache"
-import { decryptPhone } from "@/lib/phone-crypto" // 👈 Added decryption import
+import { decryptPhone } from "@/lib/phone-crypto"
 
 // ============================================================
 // Types
@@ -157,17 +157,6 @@ export async function sendSmsAction(
     }
   }
 
-  // ---- Input validation ----
-  const senderCheck = validateSenderId(input.senderId)
-  if (!senderCheck.valid) {
-    return { success: false, error: senderCheck.error }
-  }
-
-  const messageCheck = validateMessage(input.message)
-  if (!messageCheck.valid) {
-    return { success: false, error: messageCheck.error }
-  }
-
   const recipientsCheck = validateRecipientArray(input.recipients, {
     min: 1,
     max: 10000,
@@ -180,7 +169,7 @@ export async function sendSmsAction(
   const message = input.message.trim()
   const senderId = input.senderId.trim()
 
-  // ---- Verify sender ID is one of the user's approved IDs ----
+  // ---- Verify sender ID is approved ----
   const [userRow] = await sql`
     SELECT email FROM users WHERE id = ${session.userId} LIMIT 1
   `
@@ -196,6 +185,8 @@ export async function sendSmsAction(
   `
   const approvedIds = approvedRows.map((r) => r.sender_id)
 
+  // If it's NOT in the DB, reject it. (We do NOT run validateSenderId here 
+  // because the DB is the source of truth, allowing "UF BBQ").
   if (!approvedIds.includes(senderId)) {
     return {
       success: false,
@@ -203,6 +194,12 @@ export async function sendSmsAction(
         approvedIds.length > 0 ? approvedIds.join(", ") : "none"
       }`,
     }
+  }
+
+  // ---- Validate message ----
+  const messageCheck = validateMessage(message)
+  if (!messageCheck.valid) {
+    return { success: false, error: messageCheck.error }
   }
 
   // ---- Sync gate ----
@@ -289,9 +286,10 @@ export async function sendSmsAction(
     } = { success: true, campaignId: `PENDING-${Date.now()}`, totalSent: 0 }
 
     if (!isScheduled) {
+      // Pass the EXACT sender ID from the database (e.g., "UF BBQ")
       const result = await sms.send({
         recipients,
-        senderId,
+        senderId: senderId,
         message,
       })
 
@@ -312,7 +310,7 @@ export async function sendSmsAction(
       }
     }
 
-    // ---- Insert campaign row ----
+    // ---- Insert campaign row (Store the ORIGINAL senderId with spaces) ----
     const [campaign] = await sql`
       INSERT INTO sms_campaigns (
         user_id, campaign_id, sender_id, message, mode,
@@ -321,7 +319,7 @@ export async function sendSmsAction(
       ) VALUES (
         ${session.userId},
         ${gatewayResult.campaignId ?? `PENDING-${Date.now()}`},
-        ${senderId},
+        ${senderId}, 
         ${message},
         ${input.mode},
         ${recipients.length},
@@ -581,7 +579,6 @@ export async function resolveGroupRecipients(
 
   if (safeIds.length === 0) return []
 
-  // 👈 UPDATE: Query the encrypted column, not the old plaintext one
   const rows = await sql`
     SELECT DISTINCT c.phone_encrypted
     FROM contacts c
@@ -592,7 +589,6 @@ export async function resolveGroupRecipients(
     ORDER BY c.phone_encrypted
   `
 
-  // 👈 UPDATE: Decrypt the numbers in memory before sending them to the gateway
   return rows.map((r) => decryptPhone(r.phone_encrypted)).filter(Boolean)
 }
 

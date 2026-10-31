@@ -230,7 +230,8 @@ export const sms = {
     error?: string
   }> {
     try {
-      const cleanSenderId = senderId.replace(/[^a-zA-Z0-9]/g, "")
+      // KEEP SPACES. Just trim the outer edges.
+      const cleanSenderId = senderId.trim()
 
       let mnotifyPurpose = "For Sending SMS Notifications"
       
